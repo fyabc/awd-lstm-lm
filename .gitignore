@@ -11,3 +11,5 @@ __pycache__/
 /data/wikitext-2/
 
 /ignored_scripts/
+/log/
+/models/
