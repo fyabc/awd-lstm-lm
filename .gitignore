@@ -1,2 +1,13 @@
-*.pt
+# Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]
+*$py.class
+
+*.pt
+
+.idea/
+
+/data/wikitext-2-v1.zip
+/data/wikitext-2/
+
+/ignored_scripts/
