@@ -1,14 +1,13 @@
 import argparse
-import time
 import math
+import time
+
 import numpy as np
 import torch
-import torch.nn as nn
 
 import data
-import model
-
-from utils import batchify, get_batch, repackage_hidden
+from libs.modules import model
+from libs.utils.utils import batchify, get_batch, repackage_hidden
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='data/penn/',
@@ -91,7 +90,7 @@ def model_load(fn):
 
 import os
 import hashlib
-fn = 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest())
+fn = os.path.join(args.data, 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest()))
 if os.path.exists(fn):
     print('Loading cached dataset...')
     corpus = torch.load(fn)
@@ -106,11 +105,13 @@ train_data = batchify(corpus.train, args.batch_size, args)
 val_data = batchify(corpus.valid, eval_batch_size, args)
 test_data = batchify(corpus.test, test_batch_size, args)
 
+os.makedirs(os.path.dirname(args.save), exist_ok=True)
+
 ###############################################################################
 # Build the model
 ###############################################################################
 
-from splitcross import SplitCrossEntropyLoss
+from libs.modules.splitcross import SplitCrossEntropyLoss
 criterion = None
 
 ntokens = len(corpus.dictionary)
@@ -122,7 +123,7 @@ if args.resume:
     optimizer.param_groups[0]['lr'] = args.lr
     model.dropouti, model.dropouth, model.dropout, args.dropoute = args.dropouti, args.dropouth, args.dropout, args.dropoute
     if args.wdrop:
-        from weight_drop import WeightDrop
+        from libs.modules.weight_drop import WeightDrop
         for rnn in model.rnns:
             if type(rnn) == WeightDrop: rnn.dropout = args.wdrop
             elif rnn.zoneout > 0: rnn.zoneout = args.wdrop

@@ -1,15 +1,17 @@
 import argparse
-import time
 import math
+import time
+
 import numpy as np
+
 np.random.seed(331)
 import torch
 import torch.nn as nn
 
 import data
-import model
+from libs.modules import model
 
-from utils import batchify, get_batch, repackage_hidden
+from libs.utils.utils import batchify, get_batch, repackage_hidden
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='data/penn/',

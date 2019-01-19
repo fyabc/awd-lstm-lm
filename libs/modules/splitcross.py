@@ -7,7 +7,7 @@ import numpy as np
 
 
 class SplitCrossEntropyLoss(nn.Module):
-    r'''SplitCrossEntropyLoss calculates an approximate softmax'''
+    r"""SplitCrossEntropyLoss calculates an approximate softmax"""
     def __init__(self, hidden_size, splits, verbose=False):
         # We assume splits is [0, split1, split2, N] where N >= |V|
         # For example, a vocab of 1000 words may have splits [0] + [100, 500] + [inf]

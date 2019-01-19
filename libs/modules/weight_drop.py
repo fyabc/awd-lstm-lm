@@ -1,6 +1,6 @@
 import torch
 from torch.nn import Parameter
-from functools import wraps
+
 
 class WeightDrop(torch.nn.Module):
     def __init__(self, module, weights, dropout=0, variational=False):
@@ -48,7 +48,7 @@ class WeightDrop(torch.nn.Module):
 
 if __name__ == '__main__':
     import torch
-    from weight_drop import WeightDrop
+    # from libs.modules.weight_drop import WeightDrop
 
     # Input is (seq, batch, input)
     x = torch.autograd.Variable(torch.randn(2, 1, 10)).cuda()

@@ -8,8 +8,13 @@ import numpy as np
 import torch
 
 import data
-import model
-from utils import batchify, get_batch, repackage_hidden
+from libs.modules import model
+from libs.modules.splitcross import SplitCrossEntropyLoss
+from libs.modules.teacher import Teacher
+from libs.modules.weight_drop import WeightDrop
+from libs.utils import args as util_args
+from libs.utils.utils import batchify, get_batch, repackage_hidden
+from libs import train_fns
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='data/penn/',
@@ -65,8 +70,14 @@ parser.add_argument('--optimizer', type=str, default='sgd',
                     help='optimizer to use (sgd, adam)')
 parser.add_argument('--when', nargs="+", type=int, default=[-1],
                     help='When (which epochs) to divide the learning rate by 10 - accepts multiple')
+# Add other options.
+util_args.add_teacher_args(parser)
+util_args.add_train_args(parser)
+
 args = parser.parse_args()
-args.tied = True
+
+util_args.set_default_args(args)
+
 
 # Set the random seed manually for reproducibility.
 np.random.seed(args.seed)
@@ -84,13 +95,24 @@ if torch.cuda.is_available():
 
 def model_save(fn):
     with open(fn, 'wb') as f:
-        torch.save([model, criterion, optimizer], f)
+        torch.save({
+            'model': model,
+            'criterion': criterion,
+            'optimizer': optimizer,
+            'teacher': teacher.state_dict(),
+            'teacher_optimizer': teacher_optimizer,
+        }, f)
 
 
 def model_load(fn):
-    global model, criterion, optimizer
+    global model, criterion, optimizer, teacher, teacher_optimizer
     with open(fn, 'rb') as f:
-        model, criterion, optimizer = torch.load(f)
+        state = torch.load(f)
+    model = state['model']
+    criterion = state['criterion']
+    optimizer = state['optimizer']
+    teacher = build_teacher(args, model, state_dict=state['teacher'])
+    teacher_optimizer = state['teacher_optimizer']
 
 
 fn = os.path.join(args.data, 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest()))
@@ -108,11 +130,11 @@ train_data = batchify(corpus.train, args.batch_size, args)
 val_data = batchify(corpus.valid, eval_batch_size, args)
 test_data = batchify(corpus.test, test_batch_size, args)
 
+os.makedirs(os.path.dirname(args.save), exist_ok=True)
+
 ###############################################################################
 # Build the model
 ###############################################################################
-
-from splitcross import SplitCrossEntropyLoss
 
 criterion = None
 
@@ -126,8 +148,6 @@ if args.resume:
     optimizer.param_groups[0]['lr'] = args.lr
     model.dropouti, model.dropouth, model.dropout, args.dropoute = args.dropouti, args.dropouth, args.dropout, args.dropoute
     if args.wdrop:
-        from weight_drop import WeightDrop
-
         for rnn in model.rnns:
             if type(rnn) == WeightDrop:
                 rnn.dropout = args.wdrop
@@ -157,6 +177,20 @@ print('Args:', args)
 print('Model total parameters:', total_params)
 
 
+def build_teacher(args, model, state_dict=None):
+    # Build the teacher
+    teacher = Teacher(args, task=None, student=model)
+    teacher_optimizer = None
+    if state_dict is not None:
+        teacher.load_state_dict(state_dict)
+    if args.cuda:
+        teacher = teacher.cuda()
+    return teacher, teacher_optimizer
+
+
+teacher, teacher_optimizer = build_teacher(args, model)
+
+
 ###############################################################################
 # Training code
 ###############################################################################
@@ -177,8 +211,12 @@ def evaluate(data_source, batch_size=10):
 
 
 def train():
+    # L2TE settings.
+    raw = epoch <= args.raw_train_epoch
+
     # Turn on training mode which enables dropout.
-    if args.model == 'QRNN': model.reset()
+    if args.model == 'QRNN':
+        model.reset()
     total_loss = 0
     start_time = time.time()
     ntokens = len(corpus.dictionary)
@@ -201,8 +239,19 @@ def train():
         hidden = repackage_hidden(hidden)
         optimizer.zero_grad()
 
-        output, hidden, rnn_hs, dropped_rnn_hs = model(data, hidden, return_h=True)
-        raw_loss = criterion(model.decoder.weight, model.decoder.bias, output, targets)
+        sample = {'data': data, 'targets': targets, 'hidden': hidden}
+
+        if raw:
+            # TODO
+            raise NotImplementedError('Support raw training in future')
+        # else:
+        teacher_out = teacher.teacher_selection_step(sample, epoch, train=True)
+
+        (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss = train_fns.student_forward(
+            args, teacher, model,
+            sample=sample, teacher_out=teacher_out,
+            criterion=criterion,
+        )
 
         loss = raw_loss
         # Activiation Regularization
