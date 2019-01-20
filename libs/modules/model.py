@@ -64,6 +64,9 @@ class RNNModel(nn.Module):
         self.dropoute = dropoute
         self.tie_weights = tie_weights
 
+        self.raw_outputs = []
+        self.outputs = []
+
     def reset(self):
         if self.rnn_type == 'QRNN': [r.reset() for r in self.rnns]
 
@@ -74,6 +77,9 @@ class RNNModel(nn.Module):
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
     def raw_forward(self, input, hidden, return_h=False, out_index=-100):
+        self.raw_outputs.clear()
+        self.outputs.clear()
+
         # TODO: Support out_index
         emb = embedded_dropout(self.encoder, input, dropout=self.dropoute if self.training else 0)
         # emb = self.idrop(emb)
@@ -83,25 +89,23 @@ class RNNModel(nn.Module):
         raw_output = emb
         new_hidden = []
         # raw_output, hidden = self.rnn(emb, hidden)
-        raw_outputs = []
-        outputs = []
         for l, rnn in enumerate(self.rnns):
             current_input = raw_output
             raw_output, new_h = rnn(raw_output, hidden[l])
             new_hidden.append(new_h)
-            raw_outputs.append(raw_output)
+            self.raw_outputs.append(raw_output)
+            dropout = self.dropout if l == self.nlayers - 1 else self.dropouth
             if l != self.nlayers - 1:
                 # self.hdrop(raw_output)
-                raw_output = self.lockdrop(raw_output, self.dropouth)
-                outputs.append(raw_output)
+                pass
+            raw_output = self.lockdrop(raw_output, dropout)
+            self.outputs.append(raw_output)
         hidden = new_hidden
 
-        output = self.lockdrop(raw_output, self.dropout)
-        outputs.append(output)
-
+        output = raw_output
         result = output.view(output.size(0) * output.size(1), output.size(2))
         if return_h:
-            return result, hidden, raw_outputs, outputs
+            return result, hidden, self.raw_outputs.copy(), self.outputs.copy()
         return result, hidden
 
     def forward(self, input, hidden, return_h=False, model_selection=None):

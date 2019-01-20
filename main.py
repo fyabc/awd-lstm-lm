@@ -247,22 +247,17 @@ def train():
         # else:
         teacher_out = teacher.teacher_selection_step(sample, epoch, train=True)
 
-        (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss = train_fns.student_forward(
+        (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss, loss = train_fns.student_forward(
             args, teacher, model,
             sample=sample, teacher_out=teacher_out,
             criterion=criterion,
         )
 
-        loss = raw_loss
-        # Activiation Regularization
-        if args.alpha: loss = loss + sum(
-            args.alpha * dropped_rnn_h.pow(2).mean() for dropped_rnn_h in dropped_rnn_hs[-1:])
-        # Temporal Activation Regularization (slowness)
-        if args.beta: loss = loss + sum(args.beta * (rnn_h[1:] - rnn_h[:-1]).pow(2).mean() for rnn_h in rnn_hs[-1:])
         loss.backward()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-        if args.clip: torch.nn.utils.clip_grad_norm_(params, args.clip)
+        if args.clip:
+            torch.nn.utils.clip_grad_norm_(params, args.clip)
         optimizer.step()
 
         total_loss += raw_loss.data
@@ -289,7 +284,8 @@ stored_loss = 100000000
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     optimizer = None
-    # Ensure the optimizer is optimizing params, which includes both the model's weights as well as the criterion's weight (i.e. Adaptive Softmax)
+    # Ensure the optimizer is optimizing params, which includes both the model's weights as well as the criterion's
+    # weight (i.e. Adaptive Softmax)
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(params, lr=args.lr, weight_decay=args.wdecay)
     if args.optimizer == 'adam':
@@ -348,12 +344,22 @@ except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
 
-# Load the best saved model.
-model_load(args.save)
 
-# Run on test data.
-test_loss = evaluate(test_data, test_batch_size)
-print('=' * 89)
-print('| End of training | test loss {:5.2f} | test ppl {:8.2f} | test bpc {:8.3f}'.format(
-    test_loss, math.exp(test_loss), test_loss / math.log(2)))
-print('=' * 89)
+def final_evaluate(args, test_data, test_batch_size):
+    # Load the best saved model.
+    model_load(args.save)
+
+    # Run on test data.
+    test_loss = evaluate(test_data, test_batch_size)
+    print('=' * 89)
+    print('| End of training | test loss {:5.2f} | test ppl {:8.2f} | test bpc {:8.3f}'.format(
+        test_loss, math.exp(test_loss), test_loss / math.log(2)))
+    print('=' * 89)
+
+
+def main():
+    final_evaluate(args, test_data, test_batch_size)
+
+
+if __name__ == '__main__':
+    main()
