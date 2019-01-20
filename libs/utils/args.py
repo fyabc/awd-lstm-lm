@@ -23,7 +23,7 @@ def add_teacher_args(parser):
                        help='Teacher shared body hidden size, default is %(default)s')
     group.add_argument('--body-num-layers', type=int, default=2,
                        help='Teacher shared body #layers, default is %(default)s')
-    group.add_argument('--model-space', type=str, default='3,2,1',
+    group.add_argument('--model-space', type=str, default='2,1',
                        help='Teacher model space, default is %(default)r, are integers, split by commas')
     group.add_argument('--model-focus', type=int, default=None,
                        help='Focus on which model selection in raw train step.'

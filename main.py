@@ -242,23 +242,33 @@ def train():
         sample = {'data': data, 'targets': targets, 'hidden': hidden}
 
         if raw:
-            # TODO
-            raise NotImplementedError('Support raw training in future')
-        # else:
-        teacher_out = teacher.teacher_selection_step(sample, epoch, train=True)
+            (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss, loss = train_fns.student_forward(
+                args, teacher, model,
+                sample=sample, teacher_out=None,
+                criterion=criterion,
+            )
 
-        (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss, loss = train_fns.student_forward(
-            args, teacher, model,
-            sample=sample, teacher_out=teacher_out,
-            criterion=criterion,
-        )
+            loss.backward()
 
-        loss.backward()
+            # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
+            if args.clip:
+                torch.nn.utils.clip_grad_norm_(params, args.clip)
+            optimizer.step()
+        else:
+            teacher_out = teacher.teacher_selection_step(sample, epoch, train=True)
 
-        # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-        if args.clip:
-            torch.nn.utils.clip_grad_norm_(params, args.clip)
-        optimizer.step()
+            (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss, loss = train_fns.student_forward(
+                args, teacher, model,
+                sample=sample, teacher_out=teacher_out,
+                criterion=criterion,
+            )
+
+            loss.backward()
+
+            # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
+            if args.clip:
+                torch.nn.utils.clip_grad_norm_(params, args.clip)
+            optimizer.step()
 
         total_loss += raw_loss.data
         optimizer.param_groups[0]['lr'] = lr2
