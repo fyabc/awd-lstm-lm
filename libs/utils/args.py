@@ -72,6 +72,19 @@ def add_train_args(parser):
                        help='Number of raw training epochs, default is %(default)r')
     group.add_argument('-T', '--teacher-path', default=None, help='Preload teacher path, default is None')
 
+    group.add_argument('--teacher-optimizer', default='sgd',
+                       help='Teacher optimizer, default is %(default)r')
+    group.add_argument('--teacher-lr', default=0.1, type=float,
+                       help='Teacher initial learning rate')
+    group.add_argument('--teacher-wdecay', default=1e-4, type=float,
+                       help='Teacher weight decay, default is %(default)r')
+
+    group.add_argument('--first-order', action='store_true', default=False,
+                       help='Run first order optimization in teacher train step, default is False')
+
+    group.add_argument('--teacher-bptt', type=int, default=70,
+                       help='Sequence length of valid sample, default is %(default)r')
+
     return group
 
 

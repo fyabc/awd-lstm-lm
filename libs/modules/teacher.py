@@ -198,6 +198,16 @@ class Teacher(nn.Module):
 
         self._init_weights()
 
+    @classmethod
+    def build_teacher(cls, args, model, state_dict=None):
+        # Build the teacher
+        teacher = cls(args, task=None, student=model)
+        if state_dict is not None:
+            teacher.load_state_dict(state_dict)
+        if args.cuda:
+            teacher = teacher.cuda()
+        return teacher
+
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):

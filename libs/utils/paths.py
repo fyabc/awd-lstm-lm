@@ -10,3 +10,8 @@ DataPath = os.path.join(ProjectRoot, 'data')
 ModelPath = os.path.join(ProjectRoot, 'models')
 ReservedDataPath = os.path.join(ProjectRoot, 'reserved_data')
 CdfPath = os.path.join(ReservedDataPath, 'cdf.pkl')
+
+
+def with_epoch(fn, epoch):
+    base, ext = os.path.splitext(fn)
+    return '{}_{}{}'.format(base, epoch, ext)

@@ -9,9 +9,10 @@ from .weight_drop import WeightDrop
 class RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, rnn_type, ntoken, ninp, nhid, nlayers, dropout=0.5, dropouth=0.5, dropouti=0.5, dropoute=0.1,
-                 wdrop=0, tie_weights=False):
+    def __init__(self, hparams, rnn_type, ntoken, ninp, nhid, nlayers, dropout=0.5, dropouth=0.5, dropouti=0.5,
+                 dropoute=0.1, wdrop=0, tie_weights=False, echo=False):
         super(RNNModel, self).__init__()
+        self.hparams = hparams
         self.lockdrop = LockedDropout()
         self.idrop = nn.Dropout(dropouti)
         self.hdrop = nn.Dropout(dropouth)
@@ -23,12 +24,12 @@ class RNNModel(nn.Module):
                 torch.nn.LSTM(ninp if l == 0 else nhid, nhid if l != nlayers - 1 else (ninp if tie_weights else nhid),
                               1, dropout=0) for l in range(nlayers)]
             if wdrop:
-                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
+                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop, echo=echo) for rnn in self.rnns]
         if rnn_type == 'GRU':
             self.rnns = [torch.nn.GRU(ninp if l == 0 else nhid, nhid if l != nlayers - 1 else ninp, 1, dropout=0) for l
                          in range(nlayers)]
             if wdrop:
-                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
+                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop, echo=echo) for rnn in self.rnns]
         elif rnn_type == 'QRNN':
             from torchqrnn import QRNNLayer
             self.rnns = [QRNNLayer(input_size=ninp if l == 0 else nhid,
@@ -36,8 +37,9 @@ class RNNModel(nn.Module):
                                    save_prev_x=True, zoneout=0, window=2 if l == 0 else 1, output_gate=True) for l in
                          range(nlayers)]
             for rnn in self.rnns:
-                rnn.linear = WeightDrop(rnn.linear, ['weight'], dropout=wdrop)
-        print(self.rnns)
+                rnn.linear = WeightDrop(rnn.linear, ['weight'], dropout=wdrop, echo=echo)
+        if echo:
+            print(self.rnns)
         self.rnns = torch.nn.ModuleList(self.rnns)
         self.decoder = nn.Linear(nhid, ntoken)
 
@@ -67,6 +69,16 @@ class RNNModel(nn.Module):
         self.raw_outputs = []
         self.outputs = []
 
+        # For model selection.
+        self.__model_range = None
+
+    @classmethod
+    def build_model(cls, args, ntokens=None, echo=False):
+        if ntokens is None:
+            ntokens = getattr(args, 'ntokens', None)
+        return cls(args, args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.dropouth,
+                   args.dropouti, args.dropoute, args.wdrop, args.tied, echo=echo)
+
     def reset(self):
         if self.rnn_type == 'QRNN':
             [r.reset() for r in self.rnns]
@@ -77,7 +89,7 @@ class RNNModel(nn.Module):
         self.decoder.bias.data.fill_(0)
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def raw_forward(self, input, hidden, return_h=False, out_index=-100, skip_last=True):
+    def raw_forward(self, input, hidden, return_h=False, out_index=-100):
         """
 
         Args:
@@ -128,12 +140,10 @@ class RNNModel(nn.Module):
 
         raw_output, new_h = self._last_layer(raw_output, hidden[self.nlayers - 1], append=True)
         new_hidden.append(new_h)
-
-        # Postprocessing.
         hidden = new_hidden
 
-        output = raw_output
-        result = output.view(output.size(0) * output.size(1), output.size(2))
+        result = self._get_result(raw_output)
+
         if return_h:
             return result, hidden, self.raw_outputs.copy(), self.outputs.copy()
         return result, hidden
@@ -147,9 +157,43 @@ class RNNModel(nn.Module):
         raw_output = self.lockdrop(raw_output, self.dropout)
         if append:
             self.outputs.append(raw_output)
+
         return raw_output, new_h
 
+    def _get_result(self, raw_output):
+        # Postprocessing.
+        output = raw_output
+        result = output.view(output.size(0) * output.size(1), output.size(2))
+        return result
+
+    def _get_model_range(self):
+        if self.__model_range is None:
+            self.__model_range = range(self.nlayers - 3, self.nlayers - len(self.hparams.model_space) - 2, -1)
+        return self.__model_range
+
     def forward(self, input, hidden, return_h=False, model_selection=None):
+        """Forward with model selection.
+
+        Maximum model space == nlayers - 1.
+
+        Model output calculation:
+
+            {
+            model_output[0] -> last_layer -> selection[0]
+            model_output[1] -> last_layer -> selection[1]
+                ...
+            model_output[M] -> last_layer -> selection[M]
+            } => combined to final output
+
+        Args:
+            input:
+            hidden:
+            return_h:
+            model_selection:
+
+        Returns:
+
+        """
         if model_selection is None:
             return self.raw_forward(input, hidden, return_h=return_h)
         if isinstance(model_selection, int):
@@ -157,12 +201,22 @@ class RNNModel(nn.Module):
 
         result, hidden, *others = output = self.raw_forward(input, hidden, return_h=return_h)
 
-        # # Combine outputs, except the last layer.
-        # for m, o in zip(model_selection.transpose(0, 1), reversed(self.raw_outputs[:-1])):
-        #     print('#', m.shape, o.shape)
+        # Processed outputs and hiddens, in reversed order.
+        processed_outputs = [(self.outputs[-1], hidden[-1])]
+        processed_outputs.extend(
+            self._last_layer(self.outputs[i], hidden[-1], append=False)
+            for i in self._get_model_range()
+        )
 
-        # TODO: Combine selection outputs
-        return output
+        # Combine outputs.
+        # TODO: Also combine hidden states or not?
+        combined_output = sum(m.unsqueeze(0).unsqueeze(2) * o
+                              for m, (o, h) in zip(model_selection.transpose(0, 1), processed_outputs))
+        result = self._get_result(combined_output)
+        output = list(output)
+        output[0] = result
+
+        return tuple(output)
 
     def init_hidden(self, bsz):
         weight = next(self.parameters()).data

@@ -1,4 +1,5 @@
 import argparse
+from collections import namedtuple
 import hashlib
 import math
 import os
@@ -12,8 +13,10 @@ from libs.modules import model
 from libs.modules.splitcross import SplitCrossEntropyLoss
 from libs.modules.teacher import Teacher
 from libs.modules.weight_drop import WeightDrop
+from libs.utils import paths
 from libs.utils import args as util_args
-from libs.utils.utils import batchify, get_batch, repackage_hidden
+from libs.utils.optimizers import build_optimizer
+from libs.utils.utils import batchify, get_batch, repackage_hidden, CycledBatchIterator, get_lr, set_lr
 from libs import train_fns
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
@@ -100,7 +103,7 @@ def model_save(fn):
             'criterion': criterion,
             'optimizer': optimizer,
             'teacher': teacher.state_dict(),
-            'teacher_optimizer': teacher_optimizer,
+            'teacher_optimizer': teacher_optimizer.state_dict(),
         }, f)
 
 
@@ -111,8 +114,9 @@ def model_load(fn):
     model = state['model']
     criterion = state['criterion']
     optimizer = state['optimizer']
-    teacher = build_teacher(args, model, state_dict=state['teacher'])
-    teacher_optimizer = state['teacher_optimizer']
+    teacher = Teacher.build_teacher(args, model, state_dict=state['teacher'])
+    teacher_optimizer = build_optimizer(args, args.teacher_optimizer, teacher.parameters(), prefix='teacher_')
+    teacher_optimizer.load_state_dict(state['teacher_optimizer'])
 
 
 fn = os.path.join(args.data, 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest()))
@@ -138,14 +142,14 @@ os.makedirs(os.path.dirname(args.save), exist_ok=True)
 
 criterion = None
 
-ntokens = len(corpus.dictionary)
-model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.dropouth,
-                       args.dropouti, args.dropoute, args.wdrop, args.tied)
+args.ntokens = ntokens = len(corpus.dictionary)
+model = model.RNNModel.build_model(args)
+
 ###
 if args.resume:
     print('Resuming model ...')
     model_load(args.resume)
-    optimizer.param_groups[0]['lr'] = args.lr
+    set_lr(optimizer, args.lr)
     model.dropouti, model.dropouth, model.dropout, args.dropoute = args.dropouti, args.dropouth, args.dropout, args.dropoute
     if args.wdrop:
         for rnn in model.rnns:
@@ -177,47 +181,54 @@ print('Args:', args)
 print('Model total parameters:', total_params)
 
 
-def build_teacher(args, model, state_dict=None):
-    # Build the teacher
-    teacher = Teacher(args, task=None, student=model)
-    teacher_optimizer = None
-    if state_dict is not None:
-        teacher.load_state_dict(state_dict)
-    if args.cuda:
-        teacher = teacher.cuda()
-    return teacher, teacher_optimizer
+teacher = Teacher.build_teacher(args, model)
+teacher_optimizer = build_optimizer(args, args.teacher_optimizer, teacher.parameters(), prefix='teacher_')
 
 
-teacher, teacher_optimizer = build_teacher(args, model)
+# Combine hparams and models.
+Trainer = namedtuple('trainer', [
+    'hparams', 'teacher', 'student', 'student_optimizer', 'teacher_optimizer', 'criterion'])
 
 
 ###############################################################################
 # Training code
 ###############################################################################
 
-def evaluate(data_source, batch_size=10):
+def evaluate(trainer, data_source, epoch, batch_size=10, raw=True):
+    model = trainer.student
+
     # Turn on evaluation mode which disables dropout.
     model.eval()
-    if args.model == 'QRNN': model.reset()
+    if args.model == 'QRNN':
+        model.reset()
     total_loss = 0
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(batch_size)
     for i in range(0, data_source.size(0) - 1, args.bptt):
         data, targets = get_batch(data_source, i, args, evaluation=True)
-        output, hidden = model(data, hidden)
+        sample = {'data': data, 'targets': targets, 'hidden': hidden}
+
+        if raw:
+            teacher_out = trainer.teacher.teacher_selection_step(sample, epoch, train=False)
+            encoder_kw = train_fns.prepare_encoder_kw(trainer.hparams, teacher_out)
+        else:
+            encoder_kw = train_fns.prepare_encoder_kw(trainer.hparams, None)
+
+        output, hidden = model(data, hidden, **encoder_kw)
         total_loss += len(data) * criterion(model.decoder.weight, model.decoder.bias, output, targets).data
         hidden = repackage_hidden(hidden)
     return total_loss.item() / len(data_source)
 
 
-def train():
-    # L2TE settings.
-    raw = epoch <= args.raw_train_epoch
+def train(raw=False):
+    global valid_hidden
 
     # Turn on training mode which enables dropout.
     if args.model == 'QRNN':
         model.reset()
     total_loss = 0
+    total_teacher_loss = 0
+
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(args.batch_size)
@@ -229,8 +240,8 @@ def train():
         # There's a very small chance that it could select a very long sequence length resulting in OOM
         # seq_len = min(seq_len, args.bptt + 10)
 
-        lr2 = optimizer.param_groups[0]['lr']
-        optimizer.param_groups[0]['lr'] = lr2 * seq_len / args.bptt
+        lr2 = get_lr(optimizer)
+        set_lr(optimizer, lr2 * seq_len / args.bptt)
         model.train()
         data, targets = get_batch(train_data, i, args, seq_len=seq_len)
 
@@ -255,30 +266,47 @@ def train():
                 torch.nn.utils.clip_grad_norm_(params, args.clip)
             optimizer.step()
         else:
+            # 1. Teacher selection step.
             teacher_out = teacher.teacher_selection_step(sample, epoch, train=True)
 
+            # 2. Student train step.
             (output, hidden, rnn_hs, dropped_rnn_hs), raw_loss, loss = train_fns.student_forward(
                 args, teacher, model,
                 sample=sample, teacher_out=teacher_out,
                 criterion=criterion,
             )
-
             loss.backward()
-
             # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
             if args.clip:
                 torch.nn.utils.clip_grad_norm_(params, args.clip)
             optimizer.step()
 
+            # 3. Teacher train step.
+            # cycled_valid_itr.seq_len = seq_len  # [NOTE]: Can set this sequence length for next valid sample.
+            valid_hidden = repackage_hidden(valid_hidden)
+            valid_data, valid_targets = next(cycled_valid_itr)
+            valid_sample = {'data': valid_data, 'targets': valid_targets, 'hidden': valid_hidden}
+
+            teacher_train_out = train_fns.teacher_train_step(trainer, valid_sample, epoch, sample, train=True)
+
+            total_teacher_loss += teacher_train_out['teacher_objective'].data
+
+        # torch.cuda.empty_cache()
+
         total_loss += raw_loss.data
-        optimizer.param_groups[0]['lr'] = lr2
+        set_lr(optimizer, lr2)
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss.item() / args.log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:05.5f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
-                epoch, batch, len(train_data) // args.bptt, optimizer.param_groups[0]['lr'],
-                              elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), cur_loss / math.log(2)))
+            log_str = '| epoch {:3d}{}'.format(epoch, ' (raw)' if raw else '')
+            log_str += ' | {:5d}/{:5d} batches | lr {:05.5f} | ms/batch {:5.2f} | ' \
+                       'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
+                        batch, len(train_data) // args.bptt, get_lr(optimizer),
+                        elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), cur_loss / math.log(2))
+            if not raw:
+                log_str += ' | t-loss {:5.2f}'.format(total_teacher_loss / args.log_interval)
+                total_teacher_loss = 0
+            print(log_str)
             total_loss = 0
             start_time = time.time()
         ###
@@ -293,23 +321,31 @@ stored_loss = 100000000
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    optimizer = None
     # Ensure the optimizer is optimizing params, which includes both the model's weights as well as the criterion's
     # weight (i.e. Adaptive Softmax)
-    if args.optimizer == 'sgd':
-        optimizer = torch.optim.SGD(params, lr=args.lr, weight_decay=args.wdecay)
-    if args.optimizer == 'adam':
-        optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.wdecay)
+    optimizer = build_optimizer(args, args.optimizer, params)
+
+    trainer = Trainer(hparams=args, teacher=teacher, student=model,
+                      student_optimizer=optimizer, teacher_optimizer=teacher_optimizer, criterion=criterion)
+    cycled_valid_itr = CycledBatchIterator(args, val_data)
+    valid_hidden = model.init_hidden(eval_batch_size)
+
     for epoch in range(1, args.epochs + 1):
         epoch_start_time = time.time()
-        train()
+
+        raw = epoch <= args.raw_train_epoch
+        train(raw=raw)
+
+        model_save(paths.with_epoch(args.save, epoch))
+        model_save(paths.with_epoch(args.save, 'last'))
+
         if 't0' in optimizer.param_groups[0]:
             tmp = {}
             for prm in model.parameters():
                 tmp[prm] = prm.data.clone()
                 prm.data = optimizer.state[prm]['ax'].clone()
 
-            val_loss2 = evaluate(val_data)
+            val_loss2 = evaluate(trainer, val_data, epoch, raw=raw)
             print('-' * 89)
             print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                   'valid ppl {:8.2f} | valid bpc {:8.3f}'.format(
@@ -325,7 +361,7 @@ try:
                 prm.data = tmp[prm].clone()
 
         else:
-            val_loss = evaluate(val_data, eval_batch_size)
+            val_loss = evaluate(trainer, val_data, epoch, batch_size=eval_batch_size, raw=raw)
             print('-' * 89)
             print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                   'valid ppl {:8.2f} | valid bpc {:8.3f}'.format(
@@ -346,7 +382,7 @@ try:
                 print('Saving model before learning rate decreased')
                 model_save('{}.e{}'.format(args.save, epoch))
                 print('Dividing learning rate by 10')
-                optimizer.param_groups[0]['lr'] /= 10.
+                set_lr(optimizer, get_lr(optimizer) / 10.)
 
             best_val_loss.append(val_loss)
 
@@ -360,7 +396,7 @@ def final_evaluate(args, test_data, test_batch_size):
     model_load(args.save)
 
     # Run on test data.
-    test_loss = evaluate(test_data, test_batch_size)
+    test_loss = evaluate(trainer, test_data, epoch, batch_size=test_batch_size, raw=raw)
     print('=' * 89)
     print('| End of training | test loss {:5.2f} | test ppl {:8.2f} | test bpc {:8.3f}'.format(
         test_loss, math.exp(test_loss), test_loss / math.log(2)))

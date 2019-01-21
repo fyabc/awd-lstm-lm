@@ -3,13 +3,13 @@ from torch.nn import Parameter
 
 
 class WeightDrop(torch.nn.Module):
-    def __init__(self, module, weights, dropout=0, variational=False):
+    def __init__(self, module, weights, dropout=0, variational=False, echo=False):
         super(WeightDrop, self).__init__()
         self.module = module
         self.weights = weights
         self.dropout = dropout
         self.variational = variational
-        self._setup()
+        self._setup(echo=echo)
 
     def widget_demagnetizer_y2k_edition(*args, **kwargs):
         # We need to replace flatten_parameters with a nothing function
@@ -18,13 +18,14 @@ class WeightDrop(torch.nn.Module):
         # (╯°□°）╯︵ ┻━┻
         return
 
-    def _setup(self):
+    def _setup(self, echo=False):
         # Terrible temporary solution to an issue regarding compacting weights re: CUDNN RNN
         if issubclass(type(self.module), torch.nn.RNNBase):
             self.module.flatten_parameters = self.widget_demagnetizer_y2k_edition
 
         for name_w in self.weights:
-            print('Applying weight drop of {} to {}'.format(self.dropout, name_w))
+            if echo:
+                print('Applying weight drop of {} to {}'.format(self.dropout, name_w))
             w = getattr(self.module, name_w)
             del self.module._parameters[name_w]
             self.module.register_parameter(name_w + '_raw', Parameter(w.data))
